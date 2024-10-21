@@ -20,3 +20,9 @@ data/
 
 # Ignore ds_store
 .DS_Store
+
+# Ignore results
+results/
+
+# Ignore csv files
+*.csv
