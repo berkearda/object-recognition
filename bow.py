@@ -4,7 +4,9 @@ import glob
 import os
 from sklearn.cluster import KMeans
 from tqdm import tqdm
-
+import argparse
+import logging
+import csv
 
 def findnn(D1, D2):
     """
@@ -41,11 +43,21 @@ def grid_points(img, nPointsX, nPointsY, border):
     :param border: leave border pixels in each image dimension
     :return: vPoints: 2D grid point coordinates, numpy array, [nPointsX*nPointsY, 2]
     """
-    vPoints = None  # numpy array, [nPointsX*nPointsY, 2]
+    h, w = img.shape
 
-    # TODO
-    ...
+    if nPointsX <= 1 or nPointsY <= 1:
+        raise ValueError("nPointsX and nPointsY must be greater than 1 to form a grid.")
+    if border >= w // 2 or border >= h // 2:
+        raise ValueError("Border is too large relative to the image size.")
 
+    # Compute the step size between grid points
+    stepX = (w - 2 * border) // (nPointsX - 1)
+    stepY = (h - 2 * border) // (nPointsY - 1)
+
+    # Generate grid points
+    vPoints = np.array([[border + j * stepX, border + i * stepY] 
+                            for i in range(nPointsY) 
+                            for j in range(nPointsX)])
     return vPoints
 
 
@@ -56,6 +68,11 @@ def descriptors_hog(img, vPoints, cellWidth, cellHeight):
 
     grad_x = cv2.Sobel(img, cv2.CV_16S, dx=1, dy=0, ksize=1)
     grad_y = cv2.Sobel(img, cv2.CV_16S, dx=0, dy=1, ksize=1)
+
+    # Compute gradient magnitudes and angles (in degrees)
+    magnitude = np.hypot(grad_x, grad_y)
+    angle = np.arctan2(grad_y, grad_x) * (180 / np.pi)  # Convert to degrees
+    angle[angle < 0] += 180  # Ensure angles are between 0 and 180 degrees
 
     descriptors = []  # list of descriptors for the current image, each entry is one 128-d vector for a grid point
     for i in range(len(vPoints)):
@@ -73,7 +90,11 @@ def descriptors_hog(img, vPoints, cellWidth, cellHeight):
 
                 # TODO
                 # compute the angles
+                cell_magnitude = magnitude[start_y:end_y, start_x:end_x]
+                cell_angle = angle[start_y:end_y, start_x:end_x]
                 # compute the histogram
+                hist, _ = np.histogram(cell_angle, bins=nBins, range=(0, 180), weights=cell_magnitude)
+                desc.extend(hist)
                 ...
 
         descriptors.append(desc)
@@ -138,10 +159,17 @@ def bow_histogram(vFeatures, vCenters):
     :param vCenters: NxD matrix containing N cluster centers of dim. D
     :return: histo: N-dim. numpy vector containing the resulting BoW activation histogram.
     """
-    histo = None
+    num_centers = vCenters.shape[0]
+    histo = np.zeros(num_centers, dtype=np.float32)
 
     # TODO
-    ...
+    distances = np.linalg.norm(vFeatures[:, np.newaxis] - vCenters, axis=2)
+    closest_center_idxs = np.argmin(distances, axis=1)
+    histo = np.bincount(closest_center_idxs, minlength=num_centers)
+    total_count = np.sum(histo)
+
+    if total_count > 0:
+        histo = histo.astype(np.float32) / total_count
 
     return histo
 
@@ -164,13 +192,13 @@ def create_bow_histograms(nameDir, vCenters):
     # Extract features for all images in the given directory
     vBoW = []
     for i in tqdm(range(nImgs)):
-        # print('processing image {} ...'.format(i + 1))
         img = cv2.imread(vImgNames[i])  # [h, w, 3]
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)  # [h, w]
 
-        # TODO
-        ...
-
+        vPoints = grid_points(img, nPointsX, nPointsY, border)
+        vFeatures = descriptors_hog(img, vPoints, cellWidth, cellHeight)
+        bowHist = bow_histogram(vFeatures, vCenters)
+        vBoW.append(bowHist)
     vBoW = np.asarray(vBoW)  # [n_imgs, k]
     return vBoW
 
@@ -187,8 +215,9 @@ def bow_recognition_nearest(histogram, vBoWPos, vBoWNeg):
 
     # Find the nearest neighbor in the positive and negative sets and decide based on this neighbor
     # TODO
-    ...
-
+    DistPos = np.min(np.linalg.norm(histogram - vBoWPos, axis=1))
+    DistNeg = np.min(np.linalg.norm(histogram - vBoWNeg, axis=1))
+    
     if (DistPos < DistNeg):
         sLabel = 1
     else:
@@ -197,6 +226,25 @@ def bow_recognition_nearest(histogram, vBoWPos, vBoWNeg):
 
 
 if __name__ == '__main__':
+
+    # Use argparse to allow the script to accept hyperparameters from the command line
+    parser = argparse.ArgumentParser(description='Bag of Words (BoW) using KMeans and HOG descriptors')
+    
+    # Add arguments for k and numiter
+    parser.add_argument('--k', type=int, default=48, help='Number of k-means clusters')
+    parser.add_argument('--numiter', type=int, default=300, help='Maximum number of iterations for k-means')
+    parser.add_argument('--output', type=str, default='results.csv', help='File to save results to')
+
+    args = parser.parse_args()
+    
+    # Retrieve the values from the command-line arguments
+    k = args.k
+    numiter = args.numiter
+    output_file = args.output
+
+    # Log the parameters
+    logging.info(f'Starting BoW with k={k}, numiter={numiter}')
+
     # set a fixed random seed
     np.random.seed(42)
     
@@ -205,14 +253,10 @@ if __name__ == '__main__':
     nameDirPos_test = 'data/data_bow/cars-testing-pos'
     nameDirNeg_test = 'data/data_bow/cars-testing-neg'
 
-    # number of k-means clusters
-    k = None  # TODO
-    # maximum iteration numbers for k-means clustering
-    numiter = None  # TODO
-
     print('creating codebook ...')
     vCenters = create_codebook(nameDirPos_train, nameDirNeg_train, k, numiter)
-
+    print('codebook created.')
+    print('codebook shape:', vCenters.shape)
     print('creating bow histograms (pos) ...')
     vBoWPos = create_bow_histograms(nameDirPos_train, vCenters)
     print('creating bow histograms (neg) ...')
@@ -243,3 +287,18 @@ if __name__ == '__main__':
         result_neg = result_neg + cur_label
     acc_neg = 1 - result_neg / vBoWNeg_test.shape[0]
     print('test neg sample accuracy:', acc_neg)
+
+    # Get the number of samples in each test group
+    n_pos_test = vBoWPos_test.shape[0]
+    n_neg_test = vBoWNeg_test.shape[0]
+
+    # Calculate the weighted average accuracy
+    avg_accuracy = ((n_pos_test * acc_pos) + (n_neg_test * acc_neg)) / (n_pos_test + n_neg_test)
+    logging.info(f'Average weighted accuracy for k={k} and numiter={numiter}: {avg_accuracy:.4f}')
+
+    # Save the results to a CSV file
+    with open(output_file, 'a', newline='') as csvfile:
+        result_writer = csv.writer(csvfile)
+        result_writer.writerow([k, numiter, acc_pos, acc_neg, avg_accuracy])
+
+    logging.info(f'Results saved to {output_file}')
